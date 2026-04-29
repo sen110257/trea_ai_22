@@ -218,10 +218,7 @@ const loadResult = () => {
   if (savedResult) {
     result.value = savedResult
   } else {
-    const mockResult = generateMockResult()
-    result.value = mockResult
-    saveCurrentResult(mockResult)
-    saveHistory(mockResult)
+    result.value = generateMockResult()
   }
 }
 

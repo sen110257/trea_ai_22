@@ -6,57 +6,62 @@
         <span class="back-text">退出</span>
       </div>
       <div class="progress-info">
-        <span class="current-page">{{ currentIndex + 1 }}</span>
+        <span class="current-page">{{ displayIndex }}</span>
         <span class="separator">/</span>
-        <span class="total-page">{{ totalQuestions }}</span>
+        <span class="total-page">{{ displayTotal }}</span>
       </div>
       <div class="category-label">
-        <span class="category-icon">{{ categoryInfo.icon }}</span>
-        <span class="category-name">{{ categoryInfo.name }}</span>
+        <span class="category-icon">{{ displayCategoryInfo?.icon }}</span>
+        <span class="category-name">{{ displayCategoryInfo?.name }}</span>
       </div>
     </div>
     
     <div class="progress-bar-section">
       <div class="progress-bar">
-        <div class="progress-bar-fill" :style="{ width: progressPercentage + '%' }"></div>
+        <div class="progress-bar-fill" :style="{ width: displayProgress + '%' }"></div>
       </div>
     </div>
     
-    <div class="question-section" :key="currentQuestion.id">
+    <div v-if="!isLoading && currentQ" class="question-section">
       <div class="question-type-tag">
-        {{ currentQuestion.type === 'single' ? '单选题' : '多选题' }}
-        <span v-if="currentQuestion.type === 'multiple'" class="select-hint">
-          (至少选{{ currentQuestion.minSelect || 2 }}个)
+        {{ currentQ.type === 'single' ? '单选题' : '多选题' }}
+        <span v-if="currentQ.type === 'multiple'" class="select-hint">
+          (至少选{{ currentQ.minSelect || 2 }}个)
         </span>
       </div>
       
       <div class="question-card glass-card">
-        <h3 class="question-text">{{ currentQuestion.question }}</h3>
+        <h3 class="question-text">{{ currentQ.question }}</h3>
       </div>
       
       <div class="options-container">
         <div
-          v-for="option in currentQuestion.options"
-          :key="option.id"
+          v-for="opt in currentQ.options"
+          :key="opt.id"
           class="option-card glass-card-light float-effect"
-          :class="{ selected: isSelected(option.id) }"
-          @click="toggleOption(option)"
+          :class="{ selected: isSelected(opt.id) }"
+          @click="selectOpt(opt)"
         >
-          <div class="option-label">{{ option.id }}</div>
-          <div class="option-text">{{ option.text }}</div>
-          <div class="option-check" v-if="isSelected(option.id)">
+          <div class="option-label">{{ opt.id }}</div>
+          <div class="option-text">{{ opt.text }}</div>
+          <div class="option-check" v-if="isSelected(opt.id)">
             <span class="check-icon">✓</span>
           </div>
         </div>
       </div>
     </div>
     
+    <div v-else class="loading-section">
+      <div class="loading-icon">✨</div>
+      <p class="loading-text">加载中...</p>
+    </div>
+    
     <div class="nav-section">
       <button
         class="nav-btn prev-btn"
-        :class="{ disabled: currentIndex === 0 }"
-        @click="prevQuestion"
-        :disabled="currentIndex === 0"
+        :class="{ disabled: qIndex === 0 }"
+        @click="goPrev"
+        :disabled="qIndex === 0"
       >
         <span class="nav-icon">‹</span>
         <span class="nav-text">上一题</span>
@@ -65,26 +70,26 @@
       <button
         class="nav-btn next-btn"
         :class="{ 
-          disabled: !canProceed,
-          primary: canProceed
+          disabled: !canNext,
+          primary: canNext
         }"
-        @click="nextQuestion"
-        :disabled="!canProceed"
+        @click="goNext"
+        :disabled="!canNext"
       >
-        <span class="nav-text">{{ currentIndex === totalQuestions - 1 ? '查看结果' : '下一题' }}</span>
+        <span class="nav-text">{{ isLast ? '查看结果' : '下一题' }}</span>
         <span class="nav-icon">›</span>
       </button>
     </div>
     
-    <div v-if="showExitModal" class="modal-overlay" @click="closeExitModal">
+    <div v-if="showModal" class="modal-overlay" @click="closeModal">
       <div class="modal-content glass-card" @click.stop>
         <h3 class="modal-title">确认退出？</h3>
         <p class="modal-text">你的答题进度已自动保存，下次可以继续。</p>
         <div class="modal-actions">
-          <button class="modal-btn cancel-btn" @click="closeExitModal">
+          <button class="modal-btn cancel-btn" @click="closeModal">
             继续答题
           </button>
-          <button class="modal-btn confirm-btn" @click="confirmExit">
+          <button class="modal-btn confirm-btn" @click="doExit">
             退出测试
           </button>
         </div>
@@ -94,164 +99,225 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getQuestions, getCategoryInfo } from '@/data/questions'
-import { saveProgress, getProgress, clearProgress } from '@/utils/storage'
+import { saveProgress, getProgress, clearProgress, saveCurrentResult, saveHistory } from '@/utils/storage'
 import { analyzeResult } from '@/utils/resultAnalyzer'
 
 const route = useRoute()
 const router = useRouter()
 
-const category = computed(() => route.params.category)
 const questions = ref([])
-const currentIndex = ref(0)
-const answers = ref([])
-const showExitModal = ref(false)
+const qIndex = ref(0)
+const answers = ref({})
+const showModal = ref(false)
+const isLoading = ref(true)
+let saveTimer = null
 
-const categoryInfo = computed(() => getCategoryInfo(category.value))
-const totalQuestions = computed(() => questions.value.length)
-const currentQuestion = computed(() => questions.value[currentIndex.value] || null)
-const progressPercentage = computed(() => {
-  return ((currentIndex.value + 1) / totalQuestions.value) * 100
+const category = computed(() => route.params.category || 'personality')
+
+const displayCategoryInfo = computed(() => {
+  return getCategoryInfo(category.value)
 })
 
-const currentSelectedIds = computed(() => {
-  const answer = answers.value[currentIndex.value]
-  return answer ? answer.selectedIds : []
+const displayIndex = computed(() => qIndex.value + 1)
+const displayTotal = computed(() => questions.value.length)
+const isLast = computed(() => qIndex.value >= questions.value.length - 1)
+
+const displayProgress = computed(() => {
+  if (questions.value.length === 0) return 0
+  return ((qIndex.value + 1) / questions.value.length) * 100
 })
 
-const canProceed = computed(() => {
-  if (!currentQuestion.value) return false
+const currentQ = computed(() => {
+  if (qIndex.value >= 0 && qIndex.value < questions.value.length) {
+    return questions.value[qIndex.value]
+  }
+  return null
+})
+
+const currentSelected = computed(() => {
+  const key = String(qIndex.value)
+  return answers.value[key]?.ids || []
+})
+
+const canNext = computed(() => {
+  if (!currentQ.value) return false
   
-  const selectedCount = currentSelectedIds.value.length
-  if (currentQuestion.value.type === 'single') {
-    return selectedCount === 1
+  const count = currentSelected.value.length
+  if (currentQ.value.type === 'single') {
+    return count === 1
   } else {
-    const minSelect = currentQuestion.value.minSelect || 2
-    return selectedCount >= minSelect
+    const min = currentQ.value.minSelect || 2
+    return count >= min
   }
 })
 
 onMounted(() => {
-  initQuiz()
+  init()
 })
 
-watch([currentIndex, answers], () => {
-  autoSaveProgress()
-}, { deep: true })
-
-const initQuiz = () => {
-  questions.value = getQuestions(category.value)
+function init() {
+  const qs = getQuestions(category.value)
   
-  if (questions.value.length === 0) {
+  if (!qs || qs.length === 0) {
     router.push('/')
     return
   }
   
-  const savedProgress = getProgress()
-  if (savedProgress && savedProgress.category === category.value) {
-    currentIndex.value = savedProgress.currentIndex || 0
-    answers.value = savedProgress.answers || []
-  }
-}
-
-const isSelected = (optionId) => {
-  return currentSelectedIds.value.includes(optionId)
-}
-
-const toggleOption = (option) => {
-  if (!currentQuestion.value) return
+  questions.value = qs
   
-  let newSelectedIds = [...currentSelectedIds.value]
-  
-  if (currentQuestion.value.type === 'single') {
-    newSelectedIds = [option.id]
-    saveAnswer(option.id, option.score)
-  } else {
-    const index = newSelectedIds.indexOf(option.id)
-    if (index > -1) {
-      newSelectedIds.splice(index, 1)
-    } else {
-      newSelectedIds.push(option.id)
+  const saved = getProgress()
+  if (saved && saved.category === category.value) {
+    qIndex.value = saved.currentIndex || 0
+    if (saved.answers) {
+      const map = {}
+      saved.answers.forEach((a, i) => {
+        if (a) {
+          map[String(i)] = a
+        }
+      })
+      answers.value = map
     }
-    saveMultiAnswer(newSelectedIds)
   }
+  
+  isLoading.value = false
 }
 
-const saveAnswer = (optionId, score) => {
-  answers.value[currentIndex.value] = {
-    questionId: currentQuestion.value.id,
-    selectedIds: [optionId],
+function isSelected(id) {
+  return currentSelected.value.includes(id)
+}
+
+function selectOpt(opt) {
+  if (!currentQ.value) return
+  
+  const key = String(qIndex.value)
+  const q = currentQ.value
+  let ids = [...currentSelected.value]
+  
+  if (q.type === 'single') {
+    ids = [opt.id]
+    saveAnswer(key, ids, opt.score)
+  } else {
+    const idx = ids.indexOf(opt.id)
+    if (idx > -1) {
+      ids.splice(idx, 1)
+    } else {
+      ids.push(opt.id)
+    }
+    saveMultiAnswer(key, ids)
+  }
+  
+  saveToStorage()
+}
+
+function saveAnswer(key, ids, score) {
+  answers.value[key] = {
+    ids: ids,
     scores: score
   }
 }
 
-const saveMultiAnswer = (selectedIds) => {
+function saveMultiAnswer(key, ids) {
   const scores = {}
-  selectedIds.forEach(id => {
-    const option = currentQuestion.value.options.find(o => o.id === id)
-    if (option && option.score) {
-      Object.entries(option.score).forEach(([key, value]) => {
-        scores[key] = (scores[key] || 0) + value
+  ids.forEach(id => {
+    const opt = currentQ.value.options.find(o => o.id === id)
+    if (opt && opt.score) {
+      Object.entries(opt.score).forEach(([k, v]) => {
+        scores[k] = (scores[k] || 0) + v
       })
     }
   })
   
-  answers.value[currentIndex.value] = {
-    questionId: currentQuestion.value.id,
-    selectedIds: selectedIds,
+  answers.value[key] = {
+    ids: ids,
     scores: scores
   }
 }
 
-const prevQuestion = () => {
-  if (currentIndex.value > 0) {
-    currentIndex.value--
+function doSave() {
+  const arr = []
+  for (let i = 0; i < questions.value.length; i++) {
+    const key = String(i)
+    arr.push(answers.value[key] || null)
   }
-}
-
-const nextQuestion = () => {
-  if (!canProceed.value) return
   
-  if (currentIndex.value < totalQuestions.value - 1) {
-    currentIndex.value++
-  } else {
-    submitQuiz()
-  }
-}
-
-const submitQuiz = () => {
-  const validAnswers = answers.value.filter(a => a && a.selectedIds && a.selectedIds.length > 0)
-  const result = analyzeResult(validAnswers, category.value)
-  
-  clearProgress()
-  
-  router.push({
-    path: '/result',
-    query: { from: category.value }
-  })
-}
-
-const autoSaveProgress = () => {
   const progress = {
     category: category.value,
-    currentIndex: currentIndex.value,
-    answers: answers.value
+    currentIndex: qIndex.value,
+    answers: arr
   }
   saveProgress(progress)
 }
 
-const handleExit = () => {
-  showExitModal.value = true
+function saveToStorage() {
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+  }
+  saveTimer = setTimeout(() => {
+    doSave()
+  }, 300)
 }
 
-const closeExitModal = () => {
-  showExitModal.value = false
+function saveImmediate() {
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  doSave()
 }
 
-const confirmExit = () => {
-  autoSaveProgress()
+function goPrev() {
+  if (qIndex.value > 0) {
+    qIndex.value--
+  }
+}
+
+function goNext() {
+  if (!canNext.value) return
+  
+  if (!isLast.value) {
+    qIndex.value++
+    saveImmediate()
+  } else {
+    finish()
+  }
+}
+
+function finish() {
+  const arr = []
+  for (let i = 0; i < questions.value.length; i++) {
+    const key = String(i)
+    const a = answers.value[key]
+    if (a && a.ids && a.ids.length > 0) {
+      arr.push({
+        questionId: i + 1,
+        selectedIds: a.ids,
+        scores: a.scores
+      })
+    }
+  }
+  
+  const result = analyzeResult(arr, category.value)
+  
+  saveCurrentResult(result)
+  saveHistory(result)
+  clearProgress()
+  
+  router.push('/result')
+}
+
+function handleExit() {
+  showModal.value = true
+}
+
+function closeModal() {
+  showModal.value = false
+}
+
+function doExit() {
+  saveImmediate()
   router.push('/')
 }
 </script>
@@ -506,7 +572,30 @@ const confirmExit = () => {
   margin: 0 4px;
 }
 
-/* 模态框样式 */
+.loading-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.loading-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.1); opacity: 0.8; }
+}
+
+.loading-text {
+  font-size: 16px;
+  color: #7a6a6a;
+}
+
 .modal-overlay {
   position: fixed;
   top: 0;
@@ -576,7 +665,6 @@ const confirmExit = () => {
   box-shadow: 0 4px 15px rgba(255, 154, 158, 0.4);
 }
 
-/* 响应式适配 */
 @media (max-width: 320px) {
   .quiz-container {
     padding: 12px 16px;
